@@ -93,3 +93,14 @@ pip install -r requirements.txt
 
 - 修复由 AI 助手完成，专门解决 Linux 兼容性问题
 - 文档更新于 2025年8月25日
+
+## 版本兼容性
+
+- **ComfyUI 版本**: 基于 commit `56b36205` (2024年5月21日)
+- **LatentSyncWrapper 版本**: 基于原作者的最近版本 + Linux 修复
+- **Python 版本**: 3.8+
+- **系统支持**: Linux Ubuntu/Debian/CentOS
+
+## 标签
+
+`linux-support` `compatibility-fixes` `ffmpeg-fix` `huggingface-fix`
