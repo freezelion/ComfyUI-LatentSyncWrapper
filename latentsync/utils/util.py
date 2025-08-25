@@ -49,11 +49,29 @@ def read_video(video_path: str, change_fps=True, use_decord=True):
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
         os.makedirs(temp_dir, exist_ok=True)
-        command = (
-            f"ffmpeg -loglevel error -y -nostdin -i {video_path} -r 25 -crf 18 {os.path.join(temp_dir, 'video.mp4')}"
-        )
-        subprocess.run(command, shell=True)
+        
+        # Find ffmpeg executable with proper path handling
+        ffmpeg_paths = ["/usr/bin/ffmpeg", "ffmpeg"]
+        ffmpeg_cmd = None
+        for cmd in ffmpeg_paths:
+            try:
+                result = subprocess.run([cmd, "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                if result.returncode == 0:
+                    ffmpeg_cmd = cmd
+                    print(f"FFmpeg found at: {ffmpeg_cmd}")
+                    break
+            except Exception:
+                continue
+        
+        if ffmpeg_cmd is None:
+            raise FileNotFoundError("ffmpeg not found, please install it")
+        
+        # Use subprocess without shell=True for security
         target_video_path = os.path.join(temp_dir, "video.mp4")
+        subprocess.run([
+            ffmpeg_cmd, "-loglevel", "error", "-y", "-nostdin", 
+            "-i", video_path, "-r", "25", "-crf", "18", target_video_path
+        ], check=True)
     else:
         target_video_path = video_path
 
@@ -269,9 +287,22 @@ def count_video_time(video_path):
 
 def check_ffmpeg_installed():
     # Run the ffmpeg command with the -version argument to check if it's installed
-    result = subprocess.run("ffmpeg -version", stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
-    if not result.returncode == 0:
-        raise FileNotFoundError("ffmpeg not found, please install it by:\n    $ conda install -c conda-forge ffmpeg")
+    # Try multiple paths to handle different environments
+    ffmpeg_paths = ["/usr/bin/ffmpeg", "ffmpeg"]
+    
+    for ffmpeg_cmd in ffmpeg_paths:
+        try:
+            result = subprocess.run([ffmpeg_cmd, "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if result.returncode == 0:
+                print(f"FFmpeg found at: {ffmpeg_cmd}")
+                return
+            else:
+                print(f"FFmpeg check failed with return code: {result.returncode} for command: {ffmpeg_cmd}")
+        except Exception as e:
+            print(f"FFmpeg check failed for command {ffmpeg_cmd}: {str(e)}")
+            continue
+    
+    raise FileNotFoundError("ffmpeg not found, please install it by:\n    $ conda install -c conda-forge ffmpeg")
 
 
 def check_model_and_download(ckpt_path: str, huggingface_model_id: str = "ByteDance/LatentSync-1.5"):
@@ -279,11 +310,3 @@ def check_model_and_download(ckpt_path: str, huggingface_model_id: str = "ByteDa
         ckpt_path_obj = Path(ckpt_path)
         download_cmd = f"huggingface-cli download {huggingface_model_id} {Path(*ckpt_path_obj.parts[1:])} --local-dir {Path(ckpt_path_obj.parts[0])}"
         subprocess.run(download_cmd, shell=True)
-
-
-class dummy_context:
-    def __enter__(self):
-        pass
-
-    def __exit__(self, *args):
-        pass

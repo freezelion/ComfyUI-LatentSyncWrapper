@@ -10,7 +10,6 @@ import subprocess
 import numpy as np
 import torch
 import torchvision
-from torchvision import transforms
 
 from packaging import version
 
@@ -47,7 +46,7 @@ class LipsyncPipeline(DiffusionPipeline):
         self,
         vae: AutoencoderKL,
         audio_encoder: Audio2Feature,
-        unet: UNet3DConditionModel,
+        denoising_unet: UNet3DConditionModel,
         scheduler: Union[
             DDIMScheduler,
             PNDMScheduler,
@@ -86,11 +85,11 @@ class LipsyncPipeline(DiffusionPipeline):
             new_config["clip_sample"] = False
             scheduler._internal_dict = FrozenDict(new_config)
 
-        is_unet_version_less_0_9_0 = hasattr(unet.config, "_diffusers_version") and version.parse(
-            version.parse(unet.config._diffusers_version).base_version
+        is_unet_version_less_0_9_0 = hasattr(denoising_unet.config, "_diffusers_version") and version.parse(
+            version.parse(denoising_unet.config._diffusers_version).base_version
         ) < version.parse("0.9.0.dev0")
         is_unet_sample_size_less_64 = (
-            hasattr(unet.config, "sample_size") and unet.config.sample_size < 64
+            hasattr(denoising_unet.config, "sample_size") and denoising_unet.config.sample_size < 64
         )
         if is_unet_version_less_0_9_0 and is_unet_sample_size_less_64:
             deprecation_message = (
@@ -105,14 +104,14 @@ class LipsyncPipeline(DiffusionPipeline):
                 " the `unet/config.json` file"
             )
             deprecate("sample_size<64", "1.0.0", deprecation_message, standard_warn=False)
-            new_config = dict(unet.config)
+            new_config = dict(denoising_unet.config)
             new_config["sample_size"] = 64
-            unet._internal_dict = FrozenDict(new_config)
+            denoising_unet._internal_dict = FrozenDict(new_config)
 
         self.register_modules(
             vae=vae,
             audio_encoder=audio_encoder,
-            unet=unet,
+            denoising_unet=denoising_unet,
             scheduler=scheduler,
         )
 
@@ -128,9 +127,9 @@ class LipsyncPipeline(DiffusionPipeline):
 
     @property
     def _execution_device(self):
-        if self.device != torch.device("meta") or not hasattr(self.unet, "_hf_hook"):
+        if self.device != torch.device("meta") or not hasattr(self.denoising_unet, "_hf_hook"):
             return self.device
-        for module in self.unet.modules():
+        for module in self.denoising_unet.modules():
             if (
                 hasattr(module, "_hf_hook")
                 and hasattr(module._hf_hook, "execution_device")
@@ -273,9 +272,11 @@ class LipsyncPipeline(DiffusionPipeline):
             x1, y1, x2, y2 = boxes[index]
             height = int(y2 - y1)
             width = int(x2 - x1)
-            face = torchvision.transforms.functional.resize(
-                face, size=(height, width), interpolation=transforms.InterpolationMode.BICUBIC, antialias=True
-            )
+            face = torchvision.transforms.functional.resize(face, size=(height, width), antialias=True)
+            face = rearrange(face, "c h w -> h w c")
+            face = (face / 2 + 0.5).clamp(0, 1)
+            face = (face * 255).to(torch.uint8).cpu().numpy()
+            # face = cv2.resize(face, (width, height), interpolation=cv2.INTER_LANCZOS4)
             out_frame = self.image_processor.restorer.restore_img(video_frames[index], face, affine_matrices[index])
             out_frames.append(out_frame)
         return np.stack(out_frames, axis=0)
@@ -333,8 +334,8 @@ class LipsyncPipeline(DiffusionPipeline):
         callback_steps: Optional[int] = 1,
         **kwargs,
     ):
-        is_train = self.unet.training
-        self.unet.eval()
+        is_train = self.denoising_unet.training
+        self.denoising_unet.eval()
 
         check_ffmpeg_installed()
 
@@ -346,8 +347,8 @@ class LipsyncPipeline(DiffusionPipeline):
         self.set_progress_bar_config(desc=f"Sample frames: {num_frames}")
 
         # 1. Default height and width to unet
-        height = height or self.unet.config.sample_size * self.vae_scale_factor
-        width = width or self.unet.config.sample_size * self.vae_scale_factor
+        height = height or self.denoising_unet.config.sample_size * self.vae_scale_factor
+        width = width or self.denoising_unet.config.sample_size * self.vae_scale_factor
 
         # 2. Check inputs
         self.check_inputs(height, width, callback_steps)
@@ -390,7 +391,7 @@ class LipsyncPipeline(DiffusionPipeline):
 
         num_inferences = math.ceil(len(whisper_chunks) / num_frames)
         for i in tqdm.tqdm(range(num_inferences), desc="Doing inference..."):
-            if self.unet.add_audio_layer:
+            if self.denoising_unet.add_audio_layer:
                 audio_embeds = torch.stack(whisper_chunks[i * num_frames : (i + 1) * num_frames])
                 audio_embeds = audio_embeds.to(device, dtype=weight_dtype)
                 if do_classifier_free_guidance:
@@ -430,18 +431,18 @@ class LipsyncPipeline(DiffusionPipeline):
             with self.progress_bar(total=num_inference_steps) as progress_bar:
                 for j, t in enumerate(timesteps):
                     # expand the latents if we are doing classifier free guidance
-                    unet_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+                    denoising_unet_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
 
-                    unet_input = self.scheduler.scale_model_input(unet_input, t)
+                    denoising_unet_input = self.scheduler.scale_model_input(denoising_unet_input, t)
 
                     # concat latents, mask, masked_image_latents in the channel dimension
-                    unet_input = torch.cat(
-                        [unet_input, mask_latents, masked_image_latents, ref_latents], dim=1
+                    denoising_unet_input = torch.cat(
+                        [denoising_unet_input, mask_latents, masked_image_latents, ref_latents], dim=1
                     )
 
                     # predict the noise residual
-                    noise_pred = self.unet(
-                        unet_input, t, encoder_hidden_states=audio_embeds
+                    noise_pred = self.denoising_unet(
+                        denoising_unet_input, t, encoder_hidden_states=audio_embeds
                     ).sample
 
                     # perform guidance
@@ -471,7 +472,7 @@ class LipsyncPipeline(DiffusionPipeline):
         audio_samples = audio_samples[:audio_samples_remain_length].cpu().numpy()
 
         if is_train:
-            self.unet.train()
+            self.denoising_unet.train()
 
         temp_dir = "temp"
         if os.path.exists(temp_dir):
@@ -482,5 +483,28 @@ class LipsyncPipeline(DiffusionPipeline):
 
         sf.write(os.path.join(temp_dir, "audio.wav"), audio_samples, audio_sample_rate)
 
-        command = f"ffmpeg -y -loglevel error -nostdin -i {os.path.join(temp_dir, 'video.mp4')} -i {os.path.join(temp_dir, 'audio.wav')} -c:v libx264 -crf 18 -c:a aac -q:v 0 -q:a 0 {video_out_path}"
-        subprocess.run(command, shell=True)
+        # Find ffmpeg executable with proper path handling
+        ffmpeg_paths = ["/usr/bin/ffmpeg", "ffmpeg"]
+        ffmpeg_cmd = None
+        for cmd in ffmpeg_paths:
+            try:
+                result = subprocess.run([cmd, "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                if result.returncode == 0:
+                    ffmpeg_cmd = cmd
+                    print(f"FFmpeg found at: {ffmpeg_cmd}")
+                    break
+            except Exception:
+                continue
+        
+        if ffmpeg_cmd is None:
+            raise FileNotFoundError("ffmpeg not found, please install it")
+        
+        # Use subprocess without shell=True for security
+        subprocess.run([
+            ffmpeg_cmd, "-y", "-loglevel", "error", "-nostdin",
+            "-i", os.path.join(temp_dir, "video.mp4"),
+            "-i", os.path.join(temp_dir, "audio.wav"),
+            "-c:v", "libx264", "-crf", "18",
+            "-c:a", "aac", "-q:v", "0", "-q:a", "0",
+            video_out_path
+        ], check=True)

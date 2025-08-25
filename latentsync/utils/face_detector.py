@@ -1,15 +1,49 @@
 from insightface.app import FaceAnalysis
 import numpy as np
 import torch
+import os
 
-INSIGHTFACE_DETECT_SIZE = 512
+INSIGHTFACE_DETECT_SIZE = 640
 
 
 class FaceDetector:
     def __init__(self, device="cuda"):
+        # Get the absolute path to the ComfyUI-LatentSyncWrapper directory
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        # current_dir: /home/george/ComfyUI/app/custom_nodes/ComfyUI-LatentSyncWrapper/latentsync/utils
+        # wrapper_root should be: /home/george/ComfyUI/app/custom_nodes/ComfyUI-LatentSyncWrapper
+        # Need to go up 2 levels: utils -> latentsync -> ComfyUI-LatentSyncWrapper
+        wrapper_root = os.path.dirname(os.path.dirname(current_dir))
+        print(f"Wrapper root directory: {wrapper_root} current_dir: {current_dir}")
+        
+        # Check if buffalo_l model files already exist to prevent re-downloading
+        model_dir = os.path.join(wrapper_root, "checkpoints", "auxiliary", "models", "buffalo_l")
+        required_files = ["1k3d68.onnx", "2d106det.onnx", "det_10g.onnx", "genderage.onnx", "w600k_r50.onnx"]
+        
+        # Check if all required files exist
+        all_files_exist = True
+        for file in required_files:
+            file_path = os.path.join(model_dir, file)
+            if not os.path.exists(file_path):
+                all_files_exist = False
+                print(f"Missing model file: {file_path}")
+                break
+        
+        # Set environment variables to control insightface behavior
+        if all_files_exist:
+            print("All buffalo_l model files already exist, preventing re-download")
+            os.environ['INSIGHTFACE_NO_DOWNLOAD'] = '1'
+            # Set the correct home directory for insightface
+            os.environ['INSIGHTFACE_HOME'] = os.path.join(wrapper_root, "checkpoints", "auxiliary")
+        else:
+            print("Some model files are missing, allowing insightface to download")
+            # Remove the environment variable if it exists to allow download
+            if 'INSIGHTFACE_NO_DOWNLOAD' in os.environ:
+                del os.environ['INSIGHTFACE_NO_DOWNLOAD']
+        
         self.app = FaceAnalysis(
             allowed_modules=["detection", "landmark_2d_106"],
-            root="checkpoints/auxiliary",
+            root=os.path.join(wrapper_root, "checkpoints", "auxiliary"),
             providers=["CUDAExecutionProvider"],
         )
         self.app.prepare(ctx_id=cuda_to_int(device), det_size=(INSIGHTFACE_DETECT_SIZE, INSIGHTFACE_DETECT_SIZE))

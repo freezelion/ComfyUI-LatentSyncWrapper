@@ -1,4 +1,5 @@
 import os
+import subprocess
 from functools import lru_cache
 from typing import Union
 
@@ -8,6 +9,26 @@ import torch
 import torch.nn.functional as F
 
 from .utils import exact_div
+
+# Function to find ffmpeg executable with proper path handling
+def find_ffmpeg():
+    """Find ffmpeg executable with proper path handling"""
+    # Try multiple paths to handle different environments
+    ffmpeg_paths = ["/usr/bin/ffmpeg", "ffmpeg"]
+    
+    for ffmpeg_cmd in ffmpeg_paths:
+        try:
+            result = subprocess.run([ffmpeg_cmd, "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if result.returncode == 0:
+                print(f"FFmpeg found at: {ffmpeg_cmd}")
+                return ffmpeg_cmd
+            else:
+                print(f"FFmpeg check failed with return code: {result.returncode} for command: {ffmpeg_cmd}")
+        except Exception as e:
+            print(f"FFmpeg check failed for command {ffmpeg_cmd}: {str(e)}")
+            continue
+    
+    raise FileNotFoundError("ffmpeg not found, please install it by:\n    $ conda install -c conda-forge ffmpeg")
 
 # hard-coded audio hyperparameters
 SAMPLE_RATE = 16000
@@ -36,12 +57,15 @@ def load_audio(file: str, sr: int = SAMPLE_RATE):
     A NumPy array containing the audio waveform, in float32 dtype.
     """
     try:
+        # Find ffmpeg executable with proper path handling
+        ffmpeg_cmd = find_ffmpeg()
+        
         # This launches a subprocess to decode audio while down-mixing and resampling as necessary.
         # Requires the ffmpeg CLI and `ffmpeg-python` package to be installed.
         out, _ = (
             ffmpeg.input(file, threads=0)
             .output("-", format="s16le", acodec="pcm_s16le", ac=1, ar=sr)
-            .run(cmd=["ffmpeg", "-nostdin"], capture_stdout=True, capture_stderr=True)
+            .run(cmd=[ffmpeg_cmd, "-nostdin"], capture_stdout=True, capture_stderr=True)
         )
     except ffmpeg.Error as e:
         raise RuntimeError(f"Failed to load audio: {e.stderr.decode()}") from e
